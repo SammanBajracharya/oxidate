@@ -15,11 +15,20 @@ enum Action {
     MoveRight,
     MoveLeft,
 
-    AddChar(char),
+    MoveWordForward,
+    MoveWordBackward,
+
+    OpenLineAbove,
+    OpenLineBelow,
+
+    InsertCharAtCursorPos(char),
     DeleteChar,
+    DeleteCharAtCursorPos,
+    DeleteCurrentLine,
     NewLine,
 
     EnterMode(Mode),
+    SetWaitingCmd(char),
 }
 
 #[derive(Debug)]
@@ -39,6 +48,7 @@ pub struct Editor {
     size: (u16, u16),
     vtop: u16,
     vleft: u16,
+    waiting_cmd: Option<char>,
 }
 
 impl Editor {
@@ -58,7 +68,7 @@ impl Editor {
             mode: Mode::Normal,
             vtop: 0,
             vleft: 0,
-            // command_buffer: String::new(),
+            waiting_cmd: None,
         })
     }
 
@@ -77,10 +87,15 @@ impl Editor {
         0
     }
 
+    fn buffer_line(&self) -> u16 {
+        self.vtop + self.cy as u16
+    }
+
     fn viewport_line(&self, n: u16) -> Option<String> {
         let buffer_line = self.vtop + n;
         self.buffer.get(buffer_line as usize)
     }
+
 
     pub fn draw(&mut self) -> io::Result<()> {
         self.draw_viewport()?;
@@ -94,10 +109,7 @@ impl Editor {
     pub fn draw_viewport(&mut self) -> io::Result<()> {
         let vwidth = self.vwidth() as usize;
         for i in 0..self.vheight() {
-            let line = match self.viewport_line(i) {
-                None => String::new(),
-                Some(s) => s,
-            };
+            let line = self.viewport_line(i).unwrap_or_default();
 
             self.stdout
                 .queue(cursor::MoveTo(0, i))?
@@ -172,18 +184,34 @@ impl Editor {
                             self.cx = (self.vwidth() - 1) as usize;
                         }
                     },
-                    Action::EnterMode(new_mode) => self.mode = new_mode,
-                    Action::AddChar(c) => {
-                        if self.cy >= self.buffer.lines.len() { self.buffer.lines.push(String::new()); }
-
+                    Action::MoveWordForward => {
+                        // TODO: Needs fixing
                         let line = &mut self.buffer.lines[self.cy];
-
-                        if self.cx <= line.len() { line.insert(self.cx, c); }
-                        else { line.push(c); }
-
+                        if let Some(pos) = line[self.cx..].find(|c: char| c.is_whitespace()) {
+                            self.cx += pos + 1;
+                        } else {
+                            self.cx = line.len();
+                        }
+                    },
+                    Action::MoveWordBackward => {
+                        // TODO: Needs fixing
+                        let line = &mut self.buffer.lines[self.cy];
+                        if let Some(pos) = line[..self.cx].rfind(|c: char| c.is_whitespace()) {
+                            self.cx = pos;
+                        } else {
+                            self.cx = line.len();
+                        }
+                    },
+                    Action::OpenLineAbove => {
+                        self.buffer.lines.insert(self.cy, String::new());
+                    },
+                    Action::OpenLineBelow => {
+                        self.buffer.lines.insert(self.cy + 1, String::new());
+                        self.cy += 1;
+                    },
+                    Action::InsertCharAtCursorPos(c) => {
+                        self.buffer.insert(self.cx as u16, self.buffer_line(), c);
                         self.cx += 1;
-                        self.stdout.queue(cursor::MoveTo(self.cx as u16, self.cy as u16))?;
-                        self.stdout.queue(style::Print(c))?;
                     },
                     Action::DeleteChar => {
                         if self.cx == 0 && self.cy > 0 {
@@ -198,6 +226,12 @@ impl Editor {
                             self.cx = self.cx.saturating_sub(1);
                         }
                         self.stdout.queue(cursor::MoveTo(self.cx as u16, self.cy as u16))?;
+                    },
+                    Action::DeleteCharAtCursorPos => {
+                        self.buffer.delete(self.cx as u16, self.buffer_line());
+                    }
+                    Action::DeleteCurrentLine => {
+                        self.buffer.remove_line(self.buffer_line());
                     },
                     Action::NewLine => {
                         if self.cy >= self.buffer.lines.len() {
@@ -214,6 +248,10 @@ impl Editor {
                         self.cx = 0;
                         self.cy += 1;
                     }
+                    Action::EnterMode(new_mode) => self.mode = new_mode,
+                    Action::SetWaitingCmd(cmd) => {
+                        self.waiting_cmd = Some(cmd);
+                    },
                 }
             }
         }
@@ -236,17 +274,37 @@ impl Editor {
 
     // Normal Mode
     fn handle_normal_mode(&mut self, ev: event::Event) -> io::Result<Option<Action>> {
+        if let Some(cmd) = self.waiting_cmd {
+            self.waiting_cmd = None;
+            return self.handle_waiting_cmd(cmd, ev);
+        }
+
         let action = match ev {
-            event::Event::Key(event) => match event.code {
-                KeyCode::Char('q') => Some(Action::Quit),
-                KeyCode::Char('i') => Some(Action::EnterMode(Mode::Insert)),
-                KeyCode::Char('v') => Some(Action::EnterMode(Mode::Visual)),
-                // KeyCode::Char(':') => Some(Action::EnterMode(Mode::Command)),
-                KeyCode::Left | KeyCode::Char('h') => Some(Action::MoveLeft),
-                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
-                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
-                KeyCode::Right | KeyCode::Char('l') => Some(Action::MoveRight),
-                _ => None,
+            event::Event::Key(event) => {
+                let code = event.code;
+                let _modifiers = event.modifiers;
+
+                match code {
+                    KeyCode::Char('q') => Some(Action::Quit),
+                    KeyCode::Char('i') => Some(Action::EnterMode(Mode::Insert)),
+                    KeyCode::Char('a') => {
+                        self.cx += 1;
+                        Some(Action::EnterMode(Mode::Insert))
+                    },
+                    KeyCode::Char('v') => Some(Action::EnterMode(Mode::Visual)),
+                    // KeyCode::Char(':') => Some(Action::EnterMode(Mode::Command)),
+                    KeyCode::Left | KeyCode::Char('h') => Some(Action::MoveLeft),
+                    KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
+                    KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
+                    KeyCode::Right | KeyCode::Char('l') => Some(Action::MoveRight),
+                    KeyCode::Char('w') => Some(Action::MoveWordForward),
+                    KeyCode::Char('b') => Some(Action::MoveWordBackward),
+                    KeyCode::Char('d') => Some(Action::SetWaitingCmd('d')),
+                    KeyCode::Char('x') => Some(Action::DeleteCharAtCursorPos),
+                    KeyCode::Char('o') => Some(Action::OpenLineBelow),
+                    KeyCode::Char('O') => Some(Action::OpenLineAbove),
+                    _ => None,
+                }
             },
             _ => None,
         };
@@ -276,9 +334,24 @@ impl Editor {
             event::Event::Key(event) => match (event.code, event.modifiers) {
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) |
                 (KeyCode::Esc, _)=> Some(Action::EnterMode(Mode::Normal)),
-                (KeyCode::Char(c), _) => Some(Action::AddChar(c)),
+                (KeyCode::Char(c), _) => Some(Action::InsertCharAtCursorPos(c)),
                 (KeyCode::Enter, _) => Some(Action::NewLine),
                 (KeyCode::Backspace, _) => Some(Action::DeleteChar),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        Ok(action)
+    }
+
+    fn handle_waiting_cmd(&mut self, cmd: char, ev: event::Event) -> io::Result<Option<Action>> {
+        let action = match cmd {
+            'd' => match ev {
+                event::Event::Key(event) => match event.code {
+                    event::KeyCode::Char('d') => Some(Action::DeleteCurrentLine),
+                    _ => None,
+                },
                 _ => None,
             },
             _ => None,
