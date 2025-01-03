@@ -17,6 +17,10 @@ enum Action {
 
     MoveWordForward,
     MoveWordBackward,
+    MoveWordEnd,
+
+    MoveToTop,
+    MoveToBottom,
 
     OpenLineAbove,
     OpenLineBelow,
@@ -31,7 +35,7 @@ enum Action {
     SetWaitingCmd(char),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Mode {
     Normal,
     Insert,
@@ -96,7 +100,6 @@ impl Editor {
         self.buffer.get(buffer_line as usize)
     }
 
-
     pub fn draw(&mut self) -> io::Result<()> {
         self.draw_viewport()?;
         self.draw_statusline()?;
@@ -115,6 +118,11 @@ impl Editor {
                 .queue(cursor::MoveTo(0, i))?
                 .queue(style::Print(format!("{line:<width$}", width = vwidth,)))?;
         }
+        Ok(())
+    }
+
+    pub fn draw_line_numbers(&mut self) -> io::Result<()> {
+        // Need to complete
         Ok(())
     }
 
@@ -162,9 +170,15 @@ impl Editor {
             if let Some(action) = self.handle_event(event::read()?)? {
                 match action {
                     Action::Quit => break,
-                    Action::MoveUp => self.cy = self.cy.saturating_sub(1),
+                    Action::MoveUp => {
+                        self.cy = self.cy.saturating_sub(1);
+                        self.cx = self.cx.min(self.buffer.lines[self.cy].len());
+                    }
                     Action::MoveDown => {
-                        self.cy += 1;
+                        if self.cy.saturating_add(1) < self.buffer.lines.len(){
+                            self.cy += 1;
+                            self.cx = self.cx.min(self.buffer.lines[self.cy].len());
+                        }
                         if self.cy >= self.vheight() as usize {
                             self.cy = (self.vheight() - 1) as usize;
                         }
@@ -202,12 +216,27 @@ impl Editor {
                             self.cx = line.len();
                         }
                     },
+                    Action::MoveWordEnd => {
+                        self.cx = self.buffer.lines[self.cy].len()-1;
+                    },
+                    Action::MoveToTop => {
+                        self.cx = 0;
+                        self.cy = 0;
+                    },
+                    Action::MoveToBottom => {
+                        self.cx = 0;
+                        self.cy = self.buffer.lines.len() - 1;
+                    },
                     Action::OpenLineAbove => {
                         self.buffer.lines.insert(self.cy, String::new());
+                        self.mode = Mode::Insert;
+                        self.cx = 0;
                     },
                     Action::OpenLineBelow => {
                         self.buffer.lines.insert(self.cy + 1, String::new());
+                        self.mode = Mode::Insert;
                         self.cy += 1;
+                        self.cx = 0;
                     },
                     Action::InsertCharAtCursorPos(c) => {
                         self.buffer.insert(self.cx as u16, self.buffer_line(), c);
@@ -248,7 +277,10 @@ impl Editor {
                         self.cx = 0;
                         self.cy += 1;
                     }
-                    Action::EnterMode(new_mode) => self.mode = new_mode,
+                    Action::EnterMode(new_mode) => {
+                        if new_mode == Mode::Normal { self.cx = self.cx.saturating_sub(1); }
+                        self.mode = new_mode;
+                    },
                     Action::SetWaitingCmd(cmd) => {
                         self.waiting_cmd = Some(cmd);
                     },
@@ -286,6 +318,17 @@ impl Editor {
 
                 match code {
                     KeyCode::Char('q') => Some(Action::Quit),
+                    KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
+                    KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
+                    KeyCode::Right | KeyCode::Char('l') => Some(Action::MoveRight),
+                    KeyCode::Left | KeyCode::Char('h') => Some(Action::MoveLeft),
+                    KeyCode::Char('w') => Some(Action::MoveWordForward),
+                    KeyCode::Char('b') => Some(Action::MoveWordBackward),
+                    KeyCode::Char('$') => Some(Action::MoveWordEnd),
+                    KeyCode::Char('G') => Some(Action::MoveToBottom),
+                    KeyCode::Char('O') => Some(Action::OpenLineAbove),
+                    KeyCode::Char('o') => Some(Action::OpenLineBelow),
+                    KeyCode::Char('x') => Some(Action::DeleteCharAtCursorPos),
                     KeyCode::Char('i') => Some(Action::EnterMode(Mode::Insert)),
                     KeyCode::Char('a') => {
                         self.cx += 1;
@@ -293,16 +336,8 @@ impl Editor {
                     },
                     KeyCode::Char('v') => Some(Action::EnterMode(Mode::Visual)),
                     // KeyCode::Char(':') => Some(Action::EnterMode(Mode::Command)),
-                    KeyCode::Left | KeyCode::Char('h') => Some(Action::MoveLeft),
-                    KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
-                    KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
-                    KeyCode::Right | KeyCode::Char('l') => Some(Action::MoveRight),
-                    KeyCode::Char('w') => Some(Action::MoveWordForward),
-                    KeyCode::Char('b') => Some(Action::MoveWordBackward),
                     KeyCode::Char('d') => Some(Action::SetWaitingCmd('d')),
-                    KeyCode::Char('x') => Some(Action::DeleteCharAtCursorPos),
-                    KeyCode::Char('o') => Some(Action::OpenLineBelow),
-                    KeyCode::Char('O') => Some(Action::OpenLineAbove),
+                    KeyCode::Char('g') => Some(Action::SetWaitingCmd('g')),
                     _ => None,
                 }
             },
@@ -354,6 +389,13 @@ impl Editor {
                 },
                 _ => None,
             },
+            'g' => match ev {
+                event::Event::Key(event) => match event.code {
+                    event::KeyCode::Char('g') => Some(Action::MoveToTop),
+                    _ => None,
+                },
+                _ => None,
+            }
             _ => None,
         };
 
@@ -408,3 +450,5 @@ impl Editor {
         Ok(())
     }
 }
+
+

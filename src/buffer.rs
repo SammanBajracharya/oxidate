@@ -11,7 +11,7 @@ impl Buffer {
                 .lines()
                 .map(|s| s.to_string())
                 .collect(),
-            None => vec![],
+            None => vec![String::new()],
         };
 
         Self { file, lines }
