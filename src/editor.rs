@@ -77,11 +77,16 @@ impl Editor {
     }
 
     fn vwidth(&self) -> u16 {
-        self.size.0
+        self.size.0 - self.line_number_width() - 1
     }
 
     fn vheight(&self) -> u16 {
         self.size.1 - 2
+    }
+
+    fn line_number_width(&self) -> u16 {
+        let total_lines = self.buffer.len() - 1;
+        total_lines.to_string().len() as u16
     }
 
     fn line_length(&self) -> u16 {
@@ -103,7 +108,11 @@ impl Editor {
     pub fn draw(&mut self) -> io::Result<()> {
         self.draw_viewport()?;
         self.draw_statusline()?;
-        self.stdout.queue(cursor::MoveTo(self.cx as u16, self.cy as u16))?;
+        self.draw_line_numbers()?;
+
+        let x_offset = self.line_number_width() + 2;
+
+        self.stdout.queue(cursor::MoveTo(self.cx as u16 + x_offset, self.cy as u16))?;
         self.stdout.flush()?;
 
         Ok(())
@@ -111,18 +120,33 @@ impl Editor {
 
     pub fn draw_viewport(&mut self) -> io::Result<()> {
         let vwidth = self.vwidth() as usize;
+        let start_point = self.line_number_width() + 2;
         for i in 0..self.vheight() {
             let line = self.viewport_line(i).unwrap_or_default();
 
             self.stdout
-                .queue(cursor::MoveTo(0, i))?
-                .queue(style::Print(format!("{line:<width$}", width = vwidth,)))?;
+                .queue(cursor::MoveTo(start_point, i))?
+                .queue(style::Print(format!("{line:<width$}", width = vwidth)))?;
         }
         Ok(())
     }
 
     pub fn draw_line_numbers(&mut self) -> io::Result<()> {
-        // Need to complete
+        let line_number_width = self.line_number_width();
+        let editor_border_y = self.vheight().min(self.buffer.len() as u16);
+        for line_number in 0..self.vheight() {
+            let current_line = if line_number >= editor_border_y {
+                format!(" {:>width$} ", "", width = line_number_width as usize)
+            } else {
+                format!(" {:>width$} ", line_number, width = line_number_width as usize)
+            };
+
+            self.stdout.queue(cursor::MoveTo(0, line_number))?;
+            self.stdout.queue(style::PrintStyledContent(
+                current_line.with(Color::Rgb { r: 128, g: 128, b: 128 })
+                    .bold(),
+            ))?;
+        }
         Ok(())
     }
 
@@ -261,6 +285,7 @@ impl Editor {
                     }
                     Action::DeleteCurrentLine => {
                         self.buffer.remove_line(self.buffer_line());
+                        self.cy = self.cy.saturating_sub(1);
                     },
                     Action::NewLine => {
                         if self.cy >= self.buffer.lines.len() {
