@@ -86,7 +86,7 @@ impl Editor {
 
     fn line_number_width(&self) -> u16 {
         let total_lines = self.buffer.len() - 1;
-        total_lines.to_string().len() as u16
+        total_lines.to_string().len() as u16 + 2
     }
 
     fn line_length(&self) -> u16 {
@@ -136,7 +136,7 @@ impl Editor {
         let editor_border_y = self.vheight().min(self.buffer.len() as u16);
         for line_number in 0..self.vheight() {
             let current_line = if line_number >= editor_border_y {
-                format!(" {:>width$} ", "", width = line_number_width as usize)
+                format!("~{:>width$} ", "", width = line_number_width as usize)
             } else {
                 format!(" {:>width$} ", line_number, width = line_number_width as usize)
             };
