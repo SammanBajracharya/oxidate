@@ -46,4 +46,23 @@ impl Buffer {
             self.lines.remove(line as usize);
         }
     }
+
+    pub fn save(&self) -> std::io::Result<String> {
+        if let Some(file) = &self.file {
+            let contents = self.lines.join("\n");
+            std::fs::write(file, &contents)?;
+            let message = format!(
+                "{:?} {}L, {}B written",
+                file,
+                self.lines.len(),
+                contents.as_bytes().len()
+            );
+            Ok(message)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No file specified to save the buffer.",
+            ))
+        }
+    }
 }

@@ -510,7 +510,12 @@ impl Editor {
     fn process_command(&mut self, command: String) -> Option<Action> {
         match command.as_str() {
             "q" => Some(Action::Quit),
+            "w" => {
+                let _ = self.buffer.save();
+                Some(Action::EnterMode(Mode::Normal))
+            },
             "wq" => {
+                let _ = self.buffer.save();
                 Some(Action::Quit)
             },
             _ => Some(Action::EnterMode(Mode::Normal))
