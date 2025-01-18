@@ -2,7 +2,7 @@ use crossterm::{ExecutableCommand, QueueableCommand};
 use crossterm::cursor;
 use crossterm::style::{self, Color, Stylize};
 use crossterm::event::{self, KeyCode, KeyModifiers};
-use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, window_size, EnterAlternateScreen, LeaveAlternateScreen};
 use std::io::{self, Write};
 
 use crate::buffer::Buffer;
@@ -46,8 +46,8 @@ enum Mode {
 pub struct Editor {
     stdout: std::io::Stdout,
     buffer: Buffer,
-    cx: usize,
-    cy: usize,
+    cur_pos: (usize, usize),
+    scur_pos: Option<(usize, usize)>,
     mode: Mode,
     size: (u16, u16),
     vtop: u16,
@@ -67,8 +67,8 @@ impl Editor {
         Ok(Editor {
             stdout: io::stdout(),
             buffer,
-            cx: 0,
-            cy: 0,
+            cur_pos: (0, 0),
+            scur_pos: None,
             size: terminal::size()?,
             mode: Mode::Normal,
             vtop: 0,
@@ -92,14 +92,14 @@ impl Editor {
     }
 
     fn line_length(&self) -> u16 {
-        if let Some(line) = self.viewport_line(self.cy as u16) {
+        if let Some(line) = self.viewport_line(self.cur_pos.1 as u16) {
             return line.len() as u16;
         }
         0
     }
 
     fn buffer_line(&self) -> u16 {
-        self.vtop + self.cy as u16
+        self.vtop + self.cur_pos.1 as u16
     }
 
     fn viewport_line(&self, n: u16) -> Option<String> {
@@ -113,11 +113,11 @@ impl Editor {
         self.draw_line_numbers()?;
         if matches!(self.mode, Mode::Command) {
             self.draw_commandline()?;
+        } else {
+            let x_offset = self.line_number_width() + 2;
+
+            self.stdout.queue(cursor::MoveTo(self.cur_pos.0 as u16 + x_offset, self.cur_pos.1 as u16))?;
         }
-
-        let x_offset = self.line_number_width() + 2;
-
-        self.stdout.queue(cursor::MoveTo(self.cx as u16 + x_offset, self.cy as u16))?;
         self.stdout.flush()?;
 
         Ok(())
@@ -135,6 +135,7 @@ impl Editor {
         }
         Ok(())
     }
+
 
     pub fn draw_line_numbers(&mut self) -> io::Result<()> {
         let line_number_width = self.line_number_width();
@@ -158,7 +159,7 @@ impl Editor {
     pub fn draw_statusline(&mut self) -> io::Result<()> {
         let mode = format!(" {:?} ", self.mode).to_uppercase();
         let file = " src/main.rs";
-        let pos = format!(" {}:{} ", self.cx + 1, self.cy + 1);
+        let pos = format!(" {}:{} ", self.cur_pos.0 + 1, self.cur_pos.1 + 1);
 
         let file_width = self.size.0 - mode.len() as u16 - pos.len() as u16 - 2;
 
@@ -195,12 +196,24 @@ impl Editor {
 
     fn draw_commandline(&mut self) -> io::Result<()> {
         let cmd = format!(":{}", self.command_buffer);
+        let vwidth = self.vwidth() as usize;
         self.stdout
             .queue(cursor::MoveTo(0, self.size.1 - 1))?
             .queue(style::PrintStyledContent(
-                cmd.with(Color::Rgb { r: 128, g: 128, b: 128 })
-                   .bold()
-            ))?;
+                format!("{cmd:<width$}", width = vwidth)
+                    .with(Color::Rgb { r: 128, g: 128, b: 128 })
+                    .bold()
+            ))?
+            .queue(cursor::MoveTo((cmd.len()) as u16, self.size.1 - 1))?;
+        Ok(())
+    }
+
+    pub fn clear_command(&mut self) -> io::Result<()> {
+        let vwidth = self.vwidth() as usize;
+        self.stdout
+            .queue(cursor::MoveTo(0, self.size.1 - 1))?
+            .queue(style::Print(format!("{:<width$}", "", width = vwidth)))?
+            .queue(cursor::MoveTo(0, self.size.1 - 1))?;
         Ok(())
     }
 
@@ -211,118 +224,131 @@ impl Editor {
                 match action {
                     Action::Quit => break,
                     Action::MoveUp => {
-                        self.cy = self.cy.saturating_sub(1);
-                        self.cx = self.cx.min(self.buffer.lines[self.cy].len());
+                        self.cur_pos.1 = self.cur_pos.1.saturating_sub(1);
+                        self.cur_pos.0 = self.cur_pos.0.min(self.buffer.lines[self.cur_pos.1].len());
                     }
                     Action::MoveDown => {
-                        if self.cy.saturating_add(1) < self.buffer.lines.len(){
-                            self.cy += 1;
-                            self.cx = self.cx.min(self.buffer.lines[self.cy].len());
+                        if self.cur_pos.1.saturating_add(1) < self.buffer.lines.len(){
+                            self.cur_pos.1 += 1;
+                            self.cur_pos.0 = self.cur_pos.0.min(self.buffer.lines[self.cur_pos.1].len());
                         }
-                        if self.cy >= self.vheight() as usize {
-                            self.cy = (self.vheight() - 1) as usize;
+                        if self.cur_pos.1 >= self.vheight() as usize {
+                            self.cur_pos.1 = (self.vheight() - 1) as usize;
                         }
                     },
                     Action::MoveLeft => {
-                        self.cx = self.cx.saturating_sub(1);
-                        if self.cx < self.vleft as usize {
-                            self.cx = self.vleft as usize;
+                        self.cur_pos.0 = self.cur_pos.0.saturating_sub(1);
+                        if self.cur_pos.0 < self.vleft as usize {
+                            self.cur_pos.0 = self.vleft as usize;
                         }
                     },
                     Action::MoveRight => {
-                        self.cx += 1;
-                        if self.cx >= self.line_length() as usize {
-                            self.cx = self.line_length() as usize;
+                        self.cur_pos.0 += 1;
+                        if self.cur_pos.0 >= self.line_length() as usize {
+                            self.cur_pos.0 = self.line_length() as usize;
                         }
-                        if self.cx >= self.vwidth() as usize {
-                            self.cx = (self.vwidth() - 1) as usize;
+                        if self.cur_pos.0 >= self.vwidth() as usize {
+                            self.cur_pos.0 = (self.vwidth() - 1) as usize;
                         }
                     },
                     Action::MoveWordForward => {
                         // TODO: Needs fixing
-                        let line = &mut self.buffer.lines[self.cy];
-                        if let Some(pos) = line[self.cx..].find(|c: char| c.is_whitespace()) {
-                            self.cx += pos + 1;
+                        let line = &mut self.buffer.lines[self.cur_pos.1];
+                        if let Some(pos) = line[self.cur_pos.0..].find(|c: char| c.is_whitespace()) {
+                            self.cur_pos.0 += pos + 1;
                         } else {
-                            self.cx = line.len();
+                            self.cur_pos.0 = line.len();
                         }
                     },
                     Action::MoveWordBackward => {
                         // TODO: Needs fixing
-                        let line = &mut self.buffer.lines[self.cy];
-                        if let Some(pos) = line[..self.cx].rfind(|c: char| c.is_whitespace()) {
-                            self.cx = pos;
+                        let line = &mut self.buffer.lines[self.cur_pos.1];
+                        if let Some(pos) = line[..self.cur_pos.0].rfind(|c: char| c.is_whitespace()) {
+                            self.cur_pos.0 = pos;
                         } else {
-                            self.cx = line.len();
+                            self.cur_pos.0 = line.len();
                         }
                     },
                     Action::MoveWordEnd => {
-                        self.cx = self.buffer.lines[self.cy].len()-1;
+                        self.cur_pos.0 = self.buffer.lines[self.cur_pos.1].len()-1;
                     },
                     Action::MoveToTop => {
-                        self.cx = 0;
-                        self.cy = 0;
+                        self.cur_pos.0 = 0;
+                        self.cur_pos.1 = 0;
                     },
                     Action::MoveToBottom => {
-                        self.cx = 0;
-                        self.cy = self.buffer.lines.len() - 1;
+                        self.cur_pos.0 = 0;
+                        self.cur_pos.1 = self.buffer.lines.len() - 1;
                     },
                     Action::OpenLineAbove => {
-                        self.buffer.lines.insert(self.cy, String::new());
+                        self.buffer.lines.insert(self.cur_pos.1, String::new());
                         self.mode = Mode::Insert;
-                        self.cx = 0;
+                        self.cur_pos.0 = 0;
                     },
                     Action::OpenLineBelow => {
-                        self.buffer.lines.insert(self.cy + 1, String::new());
+                        self.buffer.lines.insert(self.cur_pos.1 + 1, String::new());
                         self.mode = Mode::Insert;
-                        self.cy += 1;
-                        self.cx = 0;
+                        self.cur_pos.1 += 1;
+                        self.cur_pos.0 = 0;
                     },
                     Action::InsertCharAtCursorPos(c) => {
-                        self.buffer.insert(self.cx as u16, self.buffer_line(), c);
-                        self.cx += 1;
+                        self.buffer.insert(self.cur_pos.0 as u16, self.buffer_line(), c);
+                        self.cur_pos.0 += 1;
                     },
                     Action::DeleteChar => {
-                        if self.cx == 0 && self.cy > 0 {
-                            let current_line = self.buffer.lines.remove(self.cy);
-                            self.cy -= 1;
-                            let prev_line = &mut self.buffer.lines[self.cy];
-                            self.cx = prev_line.len();
+                        if self.cur_pos.0 == 0 && self.cur_pos.1 > 0 {
+                            let current_line = self.buffer.lines.remove(self.cur_pos.1);
+                            self.cur_pos.1 -= 1;
+                            let prev_line = &mut self.buffer.lines[self.cur_pos.1];
+                            self.cur_pos.0 = prev_line.len();
                             prev_line.push_str(&current_line);
-                        } else if let Some(line) = self.buffer.lines.get_mut(self.cy) {
-                            if self.cx < line.len() { line.remove(self.cx - 1); }
+                        } else if let Some(line) = self.buffer.lines.get_mut(self.cur_pos.1) {
+                            if self.cur_pos.0 < line.len() { line.remove(self.cur_pos.0 - 1); }
                             else { line.pop(); }
-                            self.cx = self.cx.saturating_sub(1);
+                            self.cur_pos.0 = self.cur_pos.0.saturating_sub(1);
                         }
-                        self.stdout.queue(cursor::MoveTo(self.cx as u16, self.cy as u16))?;
+                        self.stdout.queue(cursor::MoveTo(self.cur_pos.0 as u16, self.cur_pos.1 as u16))?;
                     },
                     Action::DeleteCharAtCursorPos => {
-                        self.buffer.delete(self.cx as u16, self.buffer_line());
+                        self.buffer.delete(self.cur_pos.0 as u16, self.buffer_line());
                     }
                     Action::DeleteCurrentLine => {
                         self.buffer.remove_line(self.buffer_line());
-                        self.cy = self.cy.saturating_sub(1);
+                        self.cur_pos.1 = self.cur_pos.1.saturating_sub(1);
                     },
                     Action::NewLine => {
-                        if self.cy >= self.buffer.lines.len() {
+                        if self.cur_pos.1 >= self.buffer.lines.len() {
                             self.buffer.lines.push(String::new());
                         }
-                        let line = self.buffer.lines[self.cy].clone();
-                        if self.cx < line.len() {
-                            let (left, right) = line.split_at(self.cx);
-                            self.buffer.lines[self.cy] = left.to_string();
-                            self.buffer.lines.insert(self.cy + 1, right.to_string());
+                        let line = self.buffer.lines[self.cur_pos.1].clone();
+                        if self.cur_pos.0 < line.len() {
+                            let (left, right) = line.split_at(self.cur_pos.0);
+                            self.buffer.lines[self.cur_pos.1] = left.to_string();
+                            self.buffer.lines.insert(self.cur_pos.1 + 1, right.to_string());
                         } else {
-                            self.buffer.lines.insert(self.cy + 1, String::new());
+                            self.buffer.lines.insert(self.cur_pos.1 + 1, String::new());
                         }
-                        self.cx = 0;
-                        self.cy += 1;
+                        self.cur_pos.0 = 0;
+                        self.cur_pos.1 += 1;
                     },
                     Action::EnterMode(new_mode) => {
-                        if matches!(new_mode, Mode::Normal) { self.cx = self.cx.saturating_sub(1); }
-                        else if matches!(new_mode, Mode::Command) {
-                            self.cx = 1;
-                            self.cy = (self.size.1 - 1) as usize;
+                        if matches!(new_mode, Mode::Normal) {
+                            match self.mode {
+                                Mode::Command => {
+                                    self.cur_pos = self.scur_pos.unwrap();
+                                    self.scur_pos = None;
+                                    self.command_buffer.clear();
+                                    self.clear_command()?;
+                                },
+                                Mode::Insert => {
+                                    self.cur_pos = (self.cur_pos.0.saturating_sub(1), self.cur_pos.1)
+                                },
+                                _ => {}
+                            }
+                        } else if matches!(new_mode, Mode::Command) {
+                            self.scur_pos = Some(self.cur_pos);
+                            self.cur_pos.0 = 0;
+                            self.cur_pos.1 = (self.size.1 - 1) as usize;
                         };
                         self.mode = new_mode;
                     },
@@ -376,7 +402,7 @@ impl Editor {
                     KeyCode::Char('x') => Some(Action::DeleteCharAtCursorPos),
                     KeyCode::Char('i') => Some(Action::EnterMode(Mode::Insert)),
                     KeyCode::Char('a') => {
-                        self.cx += 1;
+                        self.cur_pos.0 += 1;
                         Some(Action::EnterMode(Mode::Insert))
                     },
                     KeyCode::Char('v') => Some(Action::EnterMode(Mode::Visual)),
@@ -422,8 +448,11 @@ impl Editor {
                     None
                 },
                 (KeyCode::Backspace, _) => {
-                    self.command_buffer.pop();
-                    None
+                    if self.command_buffer.is_empty() { Some(Action::EnterMode(Mode::Normal)) }
+                    else {
+                        self.command_buffer.pop();
+                        None
+                    }
                 },
                 (KeyCode::Enter, _) => {
                     let cmd = self.command_buffer.trim().to_string();
@@ -445,7 +474,9 @@ impl Editor {
                 (KeyCode::Esc, _)=> Some(Action::EnterMode(Mode::Normal)),
                 (KeyCode::Char(c), _) => Some(Action::InsertCharAtCursorPos(c)),
                 (KeyCode::Enter, _) => Some(Action::NewLine),
-                (KeyCode::Backspace, _) => Some(Action::DeleteChar),
+                (KeyCode::Backspace, _) => {
+                    Some(Action::DeleteChar)
+                }
                 _ => None,
             },
             _ => None,
@@ -485,43 +516,6 @@ impl Editor {
             _ => Some(Action::EnterMode(Mode::Normal))
         }
     }
-
-    // Command Mode
-    //fn handle_command_mode(&mut self, key_event: KeyEvent) -> io::Result<bool> {
-    //    match (key_event.code, key_event.modifiers) {
-    //        (KeyCode::Enter, _) => {
-    //            let cmd = self.command_buffer.trim();
-    //            match cmd {
-    //                "q" => return Ok(true),
-    //                "w" => {
-    //                },
-    //                "wq" => {
-    //                    // TODO: IMPLEMENT SAVE AND QUIT
-    //                    return Ok(true);
-    //                },
-    //                _ => {}
-    //            }
-    //            self.mode = Mode::Normal;
-    //            self.command_buffer.clear();
-    //        },
-    //        (KeyCode::Char('c'), KeyModifiers::CONTROL) |
-    //        (KeyCode::Esc, _) => {
-    //            self.mode = Mode::Normal;
-    //            self.command_buffer.clear();
-    //            self.status_message = "-- NORMAL --".to_string();
-    //        },
-    //        (KeyCode::Backspace, _) => {
-    //            self.command_buffer.pop();
-    //            self.status_message = format!(":{}", self.command_buffer);
-    //        },
-    //        (KeyCode::Char(c), _) => {
-    //            self.command_buffer.push(c);
-    //            self.status_message = format!(":{}", self.command_buffer);
-    //        },
-    //        _ => {}
-    //    }
-    //    Ok(false)
-    //}
 
     pub fn cleanup(&mut self) -> io::Result<()> {
         self.stdout.execute(LeaveAlternateScreen)?;
