@@ -40,7 +40,7 @@ enum Mode {
     Normal,
     Insert,
     Visual,
-    //Command,
+    Command,
 }
 
 pub struct Editor {
@@ -53,6 +53,7 @@ pub struct Editor {
     vtop: u16,
     vleft: u16,
     waiting_cmd: Option<char>,
+    command_buffer: String,
 }
 
 impl Editor {
@@ -73,6 +74,7 @@ impl Editor {
             vtop: 0,
             vleft: 0,
             waiting_cmd: None,
+            command_buffer: String::new(),
         })
     }
 
@@ -86,7 +88,7 @@ impl Editor {
 
     fn line_number_width(&self) -> u16 {
         let total_lines = self.buffer.len() - 1;
-        total_lines.to_string().len() as u16 + 2
+        (total_lines.to_string().len()).max(3) as u16 + 2
     }
 
     fn line_length(&self) -> u16 {
@@ -109,6 +111,9 @@ impl Editor {
         self.draw_viewport()?;
         self.draw_statusline()?;
         self.draw_line_numbers()?;
+        if matches!(self.mode, Mode::Command) {
+            self.draw_commandline()?;
+        }
 
         let x_offset = self.line_number_width() + 2;
 
@@ -138,7 +143,7 @@ impl Editor {
             let current_line = if line_number >= editor_border_y {
                 format!("~{:>width$} ", "", width = line_number_width as usize)
             } else {
-                format!(" {:>width$} ", line_number, width = line_number_width as usize)
+                format!(" {:>width$} ", line_number + 1, width = line_number_width as usize)
             };
 
             self.stdout.queue(cursor::MoveTo(0, line_number))?;
@@ -153,7 +158,7 @@ impl Editor {
     pub fn draw_statusline(&mut self) -> io::Result<()> {
         let mode = format!(" {:?} ", self.mode).to_uppercase();
         let file = " src/main.rs";
-        let pos = format!(" {}:{} ", self.cx, self.cy);
+        let pos = format!(" {}:{} ", self.cx + 1, self.cy + 1);
 
         let file_width = self.size.0 - mode.len() as u16 - pos.len() as u16 - 2;
 
@@ -185,6 +190,17 @@ impl Editor {
                 .on(Color::Rgb { r: 184, g: 144, b: 243 }),
         ))?;
 
+        Ok(())
+    }
+
+    fn draw_commandline(&mut self) -> io::Result<()> {
+        let cmd = format!(":{}", self.command_buffer);
+        self.stdout
+            .queue(cursor::MoveTo(0, self.size.1 - 1))?
+            .queue(style::PrintStyledContent(
+                cmd.with(Color::Rgb { r: 128, g: 128, b: 128 })
+                   .bold()
+            ))?;
         Ok(())
     }
 
@@ -301,9 +317,13 @@ impl Editor {
                         }
                         self.cx = 0;
                         self.cy += 1;
-                    }
+                    },
                     Action::EnterMode(new_mode) => {
-                        if new_mode == Mode::Normal { self.cx = self.cx.saturating_sub(1); }
+                        if matches!(new_mode, Mode::Normal) { self.cx = self.cx.saturating_sub(1); }
+                        else if matches!(new_mode, Mode::Command) {
+                            self.cx = 1;
+                            self.cy = (self.size.1 - 1) as usize;
+                        };
                         self.mode = new_mode;
                     },
                     Action::SetWaitingCmd(cmd) => {
@@ -325,7 +345,7 @@ impl Editor {
             Mode::Normal => self.handle_normal_mode(ev),
             Mode::Insert => self.handle_insert_mode(ev),
             Mode::Visual => self.handle_visual_mode(ev),
-            //Mode::Command => self.handle_command_mode(ev),
+            Mode::Command => self.handle_command_mode(ev),
         }
     }
 
@@ -360,7 +380,7 @@ impl Editor {
                         Some(Action::EnterMode(Mode::Insert))
                     },
                     KeyCode::Char('v') => Some(Action::EnterMode(Mode::Visual)),
-                    // KeyCode::Char(':') => Some(Action::EnterMode(Mode::Command)),
+                     KeyCode::Char(':') => Some(Action::EnterMode(Mode::Command)),
                     KeyCode::Char('d') => Some(Action::SetWaitingCmd('d')),
                     KeyCode::Char('g') => Some(Action::SetWaitingCmd('g')),
                     _ => None,
@@ -381,6 +401,35 @@ impl Editor {
                 (KeyCode::Char('j'), _) => Some(Action::MoveDown),
                 (KeyCode::Char('k'), _) => Some(Action::MoveUp),
                 (KeyCode::Char('l'), _) => Some(Action::MoveRight),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        Ok(action)
+    }
+
+    fn handle_command_mode(&mut self, ev: event::Event) -> io::Result<Option<Action>> {
+        let action = match ev {
+            event::Event::Key(event) => match (event.code, event.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) |
+                (KeyCode::Esc, _) => {
+                    self.command_buffer.clear();
+                    Some(Action::EnterMode(Mode::Normal))
+                },
+                (KeyCode::Char(c), _) => {
+                    self.command_buffer.push(c);
+                    None
+                },
+                (KeyCode::Backspace, _) => {
+                    self.command_buffer.pop();
+                    None
+                },
+                (KeyCode::Enter, _) => {
+                    let cmd = self.command_buffer.trim().to_string();
+                    self.command_buffer.clear();
+                    self.process_command(cmd)
+                },
                 _ => None,
             },
             _ => None,
@@ -427,6 +476,16 @@ impl Editor {
         Ok(action)
     }
 
+    fn process_command(&mut self, command: String) -> Option<Action> {
+        match command.as_str() {
+            "q" => Some(Action::Quit),
+            "wq" => {
+                Some(Action::Quit)
+            },
+            _ => Some(Action::EnterMode(Mode::Normal))
+        }
+    }
+
     // Command Mode
     //fn handle_command_mode(&mut self, key_event: KeyEvent) -> io::Result<bool> {
     //    match (key_event.code, key_event.modifiers) {
@@ -435,16 +494,12 @@ impl Editor {
     //            match cmd {
     //                "q" => return Ok(true),
     //                "w" => {
-    //                    // TODO: IMPLEMENT SAVE
-    //                    self.status_message = "File Saved".to_string();
     //                },
     //                "wq" => {
     //                    // TODO: IMPLEMENT SAVE AND QUIT
     //                    return Ok(true);
     //                },
-    //                _ => {
-    //                    self.status_message = format!("Unknown command: {}", cmd);
-    //                }
+    //                _ => {}
     //            }
     //            self.mode = Mode::Normal;
     //            self.command_buffer.clear();
